@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"E:/mycode/hot_analysis_plugin\" log --oneline -5)",
+      "WebSearch",
+      "Bash(npm --version)",
+      "Bash(pip install *)",
+      "Bash(npm install *)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(python -c \"from app.main import app; print\\('FastAPI app loaded OK'\\)\")",
+      "Bash(uvicorn app.main:app --host 127.0.0.1 --port 8000)",
+      "Bash(curl -s http://127.0.0.1:8000/)",
+      "Bash(kill %1)",
+      "Bash(netstat -ano)",
+      "Bash(taskkill *)",
+      "Bash(npx vite *)",
+      "Bash(curl -s http://localhost:5173/)",
+      "Bash(curl *)",
+      "Bash(python -c \"from app.main import app; print\\('OK'\\)\")",
+      "Bash(python -m json.tool)",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"from app.agent.agent import create_agent; print\\('OK'\\)\")",
+      "Bash(python -c \"from deepagents import create_deep_agent; help\\(create_deep_agent\\)\")",
+      "Bash(pip show *)",
+      "Bash(python *)",
+      "Bash(pip index *)",
+      "Bash(set PYTHONPATH=E:/mycode/hot_analysis_plugin/server)"
+    ]
+  }
+}
