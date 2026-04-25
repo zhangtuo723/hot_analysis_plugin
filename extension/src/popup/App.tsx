@@ -45,7 +45,7 @@ function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // 恢复对话
+  // 恢复对话：从后端拿全量数据（消息 + 工具调用记录）
   useEffect(() => {
     chrome.storage.local.get(["conversationId"], async (result) => {
       const cid = result.conversationId as string | undefined;
@@ -56,6 +56,7 @@ function App() {
             const data = await resp.json();
             setConversationId(cid);
             setMessages(data.messages);
+            if (data.tool_calls) setToolCalls(data.tool_calls);
           }
         } catch {
           /* ignore */
@@ -296,7 +297,7 @@ function App() {
   if (!ready) return null;
 
   return (
-    <div className="flex flex-col h-[500px] w-[400px] bg-white">
+    <div className="flex flex-col h-[600px] w-[400px] bg-white">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2.5 border-b bg-red-50">
         <div className="flex items-center gap-2">
@@ -334,7 +335,7 @@ function App() {
                       </span>
                     </div>
                     {tc.expanded && (
-                      <div className="px-2 pb-1.5 space-y-1">
+                      <div className="px-2 pb-1.5 space-y-1 max-h-48 overflow-y-auto">
                         <div className="text-[10px] text-gray-500 bg-gray-50 rounded px-1.5 py-1">
                           <div className="font-medium text-gray-600">参数：</div>
                           <pre className="whitespace-pre-wrap break-all">
@@ -344,16 +345,7 @@ function App() {
                         {tc.result && (
                           <div className="text-[10px] text-gray-500 bg-gray-50 rounded px-1.5 py-1">
                             <div className="font-medium text-gray-600">结果：</div>
-                            {tc.tool === "screenshot" ? (
-                              <img
-                                src={tc.result.replace("[图片: ", "").replace("]", "")}
-                                alt="screenshot"
-                                className="max-w-full rounded border mt-1"
-                                style={{ maxHeight: 200 }}
-                              />
-                            ) : (
-                              <pre className="whitespace-pre-wrap break-all">{tc.result}</pre>
-                            )}
+                            <ToolResultContent result={tc.result} />
                           </div>
                         )}
                       </div>
@@ -413,6 +405,42 @@ function App() {
       </div>
     </div>
   );
+}
+
+function ToolResultContent({ result }: { result: string }) {
+  const parts: React.ReactNode[] = [];
+  const regex = /\[图片: ([^\]]+)\]/g;
+  let lastIndex = 0;
+  let match;
+  let key = 0;
+
+  while ((match = regex.exec(result)) !== null) {
+    const textBefore = result.slice(lastIndex, match.index);
+    if (textBefore) {
+      parts.push(
+        <span key={key++} className="whitespace-pre-wrap break-all">{textBefore}</span>
+      );
+    }
+    parts.push(
+      <img
+        key={key++}
+        src={match[1]}
+        alt="tool-result"
+        className="max-w-full rounded border mt-1"
+        style={{ maxHeight: 200 }}
+      />
+    );
+    lastIndex = regex.lastIndex;
+  }
+
+  const textAfter = result.slice(lastIndex);
+  if (textAfter) {
+    parts.push(
+      <span key={key++} className="whitespace-pre-wrap break-all">{textAfter}</span>
+    );
+  }
+
+  return <>{parts}</>;
 }
 
 export default App;

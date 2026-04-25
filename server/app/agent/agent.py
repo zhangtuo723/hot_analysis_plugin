@@ -1,41 +1,58 @@
-"""Deep Agent - 基于 deepagents create_deep_agent + ChatMoonshot"""
+"""Deep Agent - 基于 deepagents create_deep_agent + ChatMoonshot + LangGraph checkpoint"""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Awaitable, Callable
 
+import aiosqlite
 from langchain_moonshot import ChatMoonshot
 from deepagents import create_deep_agent
+from deepagents.backends.filesystem import FilesystemBackend
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.config import settings
 from app.agent.tools import create_browser_tool
 
-SYSTEM_PROMPT = """你是小红书爆款内容分析专家，同时也是一个可以操控浏览器的 Agent。
+CHECKPOINT_DB_PATH = str(
+    Path(__file__).resolve().parent.parent.parent / "agent_checkpoints.db"
+)
 
-你可以通过工具来操作浏览器页面，获取小红书上的数据并进行分析。
-
-**重要操作规范：**
-1. 每个操作后，工具会自动等待页面稳定（检测 loading 消失和 DOM 高度稳定）
-2. type_text 提交搜索后，工具内部已等待 4 秒让页面跳转和笔记列表加载
-3. scroll_page 滚动后，工具内部已等待 2 秒让懒加载内容出现
-4. 如果获取到的内容看起来不完整或包含 loading 状态，请用 screenshot 截图确认页面实际状态
-5. **CSS 选择器必须使用标准语法**：如 `#id`、`.class`、`[attr='value']`、`:nth-child(n)`。**不要使用 jQuery 语法如 `:contains('文本')`**。如果要找包含特定文本的元素，先获取 DOM 结构查看实际 class 和属性
-6. **如果工具返回了错误信息（如 Error: Element not found），不要中断任务**。分析错误原因，换一种选择器或方法继续尝试，直到成功
-
-**标准工作流程：**
-1. 先用 get_dom_structure 了解页面结构，找到搜索框等关键元素
-2. 用 type_text 在搜索框输入关键词（submit=true 提交搜索）——工具会自动等待页面加载
-3. 用 screenshot 查看搜索结果页是否加载完成
-4. 用 scroll_page 滚动加载更多内容——工具会自动等待
-5. 用 get_page_content 提取页面上的笔记数据
-6. 基于提取的数据进行深度分析
-
-**分析维度包括：** 爆款共性、标题套路、封面风格、用户真实需求、蓝海机会、可复制选题等。
-
-请用中文分析，结构清晰，重点突出。"""
+_checkpointer: AsyncSqliteSaver | None = None
 
 
-def create_agent(browser_executor: Callable[..., Awaitable[str]]):
+async def _get_checkpointer() -> AsyncSqliteSaver:
+    """延迟初始化 AsyncSqliteSaver（单例）"""
+    global _checkpointer
+    if _checkpointer is None:
+        conn = await aiosqlite.connect(CHECKPOINT_DB_PATH)
+        _checkpointer = AsyncSqliteSaver(conn)
+    return _checkpointer
+
+
+async def close_checkpointer() -> None:
+    """关闭 checkpointer 的 sqlite 连接（优雅退出用）"""
+    global _checkpointer
+    if _checkpointer is not None:
+        await _checkpointer.conn.close()
+        _checkpointer = None
+
+SYSTEM_PROMPT = """你是小红书爆款内容分析专家，可以操控浏览器获取数据并分析。
+
+**安全约束：**
+1. CSS 选择器必须使用标准语法（#id、.class、[attr='value']、:nth-child(n)），不要使用 jQuery 语法如 :contains('文本')
+2. 工具报错时不要中断任务，换选择器或方法继续尝试
+3. 页面状态不确定时，用 screenshot 截图确认
+
+**Skill 使用：**
+- 涉及小红书搜索和抓取 → 加载 xhs-search skill
+- 涉及数据分析和报告输出 → 加载 xhs-analyze skill
+- 加载方式：read_file(path) 读取 skill 完整指令"""
+
+
+def create_agent(
+    browser_executor: Callable[..., Awaitable[str]], checkpointer: AsyncSqliteSaver
+):
     """创建 Deep Agent"""
     tools = create_browser_tool(browser_executor)
 
@@ -50,19 +67,33 @@ def create_agent(browser_executor: Callable[..., Awaitable[str]]):
         temperature=0.7,
     )
 
+    skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
+    backend = FilesystemBackend(root_dir=str(skills_dir), virtual_mode=True)
+
     return create_deep_agent(
         model=llm,
         tools=tools,
         system_prompt=SYSTEM_PROMPT,
+        skills=["/"],
+        backend=backend,
+        checkpointer=checkpointer,
     )
 
 
 async def run_agent(
     browser_executor: Callable[..., Awaitable[str]],
     messages: list[dict],
+    thread_id: str,
 ) -> str:
-    """运行 Agent，返回最终回复文本"""
-    agent = create_agent(browser_executor)
+    """运行 Agent，返回最终回复文本。
+
+    Args:
+        browser_executor: 浏览器工具执行器
+        messages: 当前轮次的消息（LangGraph 会从 checkpoint 自动恢复历史）
+        thread_id: 对话线程 ID（对应 conversation_id）
+    """
+    checkpointer = await _get_checkpointer()
+    agent = create_agent(browser_executor, checkpointer)
 
     langchain_messages = []
     for msg in messages:
@@ -73,7 +104,10 @@ async def run_agent(
         elif role == "assistant":
             langchain_messages.append(("assistant", content))
 
-    result = await agent.ainvoke({"messages": langchain_messages})
+    result = await agent.ainvoke(
+        {"messages": langchain_messages},
+        config={"configurable": {"thread_id": thread_id}},
+    )
 
     ai_messages = [m for m in result["messages"] if m.type == "ai"]
     if ai_messages:
@@ -85,8 +119,14 @@ async def run_agent(
 async def run_agent_stream(
     browser_executor: Callable[..., Awaitable[str]],
     messages: list[dict],
+    thread_id: str,
 ):
-    """运行 Agent，流式 yield 中间事件
+    """运行 Agent，流式 yield 中间事件。
+
+    Args:
+        browser_executor: 浏览器工具执行器
+        messages: 当前轮次的消息（LangGraph 会从 checkpoint 自动恢复历史）
+        thread_id: 对话线程 ID（对应 conversation_id）
 
     Yields:
         {"type": "tool_start", "tool": str, "params": dict}
@@ -95,7 +135,8 @@ async def run_agent_stream(
         {"type": "error", "message": str}
         {"type": "done"}
     """
-    agent = create_agent(browser_executor)
+    checkpointer = await _get_checkpointer()
+    agent = create_agent(browser_executor, checkpointer)
 
     langchain_messages = []
     for msg in messages:
@@ -106,11 +147,13 @@ async def run_agent_stream(
         elif role == "assistant":
             langchain_messages.append(("assistant", content))
 
-    # 记录 tool_call_id -> tool_name，用于工具异常时匹配
     tool_call_map: dict[str, str] = {}
 
     try:
-        async for chunk in agent.astream({"messages": langchain_messages}):
+        async for chunk in agent.astream(
+            {"messages": langchain_messages},
+            config={"configurable": {"thread_id": thread_id}},
+        ):
             for node_name, node_output in chunk.items():
                 # 忽略中间件节点
                 if "Middleware" in node_name:
@@ -121,14 +164,20 @@ async def run_agent_stream(
                         # Tool call 意图
                         if hasattr(msg, "tool_calls") and msg.tool_calls:
                             for tc in msg.tool_calls:
-                                tool_name = tc.get("name", tc.get("function", {}).get("name", "unknown"))
+                                tool_name = tc.get(
+                                    "name",
+                                    tc.get("function", {}).get("name", "unknown"),
+                                )
                                 tool_id = tc.get("id", "")
                                 if tool_id:
                                     tool_call_map[tool_id] = tool_name
                                 yield {
                                     "type": "tool_start",
                                     "tool": tool_name,
-                                    "params": tc.get("args", tc.get("function", {}).get("arguments", {})),
+                                    "params": tc.get(
+                                        "args",
+                                        tc.get("function", {}).get("arguments", {}),
+                                    ),
                                 }
                         # AI 回复内容（最终回复，无 tool_calls）
                         elif msg.content:
@@ -148,14 +197,20 @@ async def run_agent_stream(
                             if isinstance(msg.content, list):
                                 result_parts = []
                                 for block in msg.content:
-                                    if isinstance(block, dict) and block.get("type") == "image_url":
-                                        url = block.get("image_url", {}).get("url", "")
-                                        if url.startswith("data:image"):
-                                            result_parts.append(f"[图片: {url}]")
-                                        else:
-                                            result_parts.append(f"[图片: {url}]")
-                                    elif isinstance(block, dict) and block.get("type") == "text":
-                                        result_parts.append(block.get("text", ""))
+                                    if (
+                                        isinstance(block, dict)
+                                        and block.get("type") == "image_url"
+                                    ):
+                                        result_parts.append(
+                                            f"[图片: {block.get('image_url', {}).get('url', '')}]"
+                                        )
+                                    elif (
+                                        isinstance(block, dict)
+                                        and block.get("type") == "text"
+                                    ):
+                                        result_parts.append(
+                                            block.get("text", "")
+                                        )
                                 result_text = " ".join(result_parts)
                             else:
                                 result_text = str(msg.content)

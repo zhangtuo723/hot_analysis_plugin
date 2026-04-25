@@ -1,6 +1,8 @@
 // 注入小红书页面的内容脚本
 // 提供原子级浏览器操作，由 Agent 按需调用
 
+import { captureVideoFrame, extractFrames, findMainVideo, getVideoInfo, seekTo } from "./videoCapture";
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.action === "executeTool") {
     executeTool(msg.tool, msg.params)
@@ -34,6 +36,18 @@ async function executeTool(
     case "get_dom_structure":
       await waitForPageStable();
       return getDomStructure(String(params.selector || "body"), Number(params.depth || 3));
+
+    case "extract_video_frames": {
+      const interval = Number(params.interval || 2);
+      const selectorEvf = params.selector ? String(params.selector) : undefined;
+      return handleExtractVideoFrames(interval, selectorEvf);
+    }
+
+    case "capture_video_snapshot": {
+      const timeParam = params.time !== undefined ? Number(params.time) : undefined;
+      const selectorCvs = params.selector ? String(params.selector) : undefined;
+      return handleVideoSnapshot(timeParam, selectorCvs);
+    }
 
     default:
       throw new Error(`Unknown tool: ${tool}`);
@@ -268,4 +282,74 @@ async function waitForPageStable(maxWaitMs = 8000): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 抽帧分析视频：均匀截取多帧并返回 base64 列表。
+ */
+async function handleExtractVideoFrames(interval = 2, selector?: string): Promise<string> {
+  const video = findMainVideo(selector);
+  if (!video) throw new Error(selector ? `未找到选择器对应的视频: ${selector}` : "页面未找到视频元素");
+
+  const info = getVideoInfo(video);
+  if (!info.duration || info.duration <= 0) {
+    throw new Error("视频时长不可用，可能尚未加载完成");
+  }
+
+  const frames = await extractFrames(video, interval);
+
+  // 返回 JSON：包含视频元信息 + 帧列表
+  return JSON.stringify(
+    {
+      video_info: info,
+      frames: frames.map((f) => ({
+        time: f.time,
+        data_url: f.dataUrl,
+        // 为了节省空间，也可以只返回缩略图或上传到后端后再发 URL
+      })),
+      frame_count: frames.length,
+    },
+    null,
+    2
+  );
+}
+
+/**
+ * 截取视频画面（单帧）。
+ * 如果传了 time，会先 pause → seek → 截图 → 恢复原状态，确保精确。
+ * 如果没传 time，直接抓拍当前画面。
+ */
+async function handleVideoSnapshot(time?: number, selector?: string): Promise<string> {
+  const video = findMainVideo(selector);
+  if (!video) throw new Error(selector ? `未找到选择器对应的视频: ${selector}` : "页面未找到视频元素");
+
+  const info = getVideoInfo(video);
+  let dataUrl: string;
+  let capturedTime: number;
+
+  if (time !== undefined && time >= 0 && isFinite(time)) {
+    const originalTime = video.currentTime;
+    const originalPaused = video.paused;
+
+    video.pause();
+    await seekTo(video, time);
+    dataUrl = captureVideoFrame(video);
+    capturedTime = video.currentTime;
+
+    // 恢复
+    await seekTo(video, originalTime);
+    if (!originalPaused) video.play();
+  } else {
+    dataUrl = captureVideoFrame(video);
+    capturedTime = info.currentTime;
+  }
+
+  return JSON.stringify(
+    {
+      video_info: info,
+      snapshot: { time: capturedTime, data_url: dataUrl },
+    },
+    null,
+    2
+  );
 }

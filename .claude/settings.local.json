@@ -25,7 +25,10 @@
       "Bash(pip show *)",
       "Bash(python *)",
       "Bash(pip index *)",
-      "Bash(set PYTHONPATH=E:/mycode/hot_analysis_plugin/server)"
+      "Bash(set PYTHONPATH=E:/mycode/hot_analysis_plugin/server)",
+      "Bash(pip list *)",
+      "Bash(tasklist)",
+      "Bash(findstr python *)"
     ]
   }
 }

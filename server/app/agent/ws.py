@@ -43,12 +43,24 @@ class BrowserConnection:
             else:
                 future.set_exception(Exception(data.get("error", "工具执行失败")))
 
+    async def close(self):
+        """取消所有 pending future 并关闭 websocket"""
+        for future in self._pending.values():
+            if not future.done():
+                future.cancel()
+        self._pending.clear()
+        try:
+            await self.ws.close()
+        except Exception:
+            pass
+
 
 class BrowserToolManager:
     """管理所有扩展连接，提供工具执行器"""
 
     def __init__(self):
         self._connections: dict[str, BrowserConnection] = {}
+        self.shutdown_event = asyncio.Event()
 
     def add(self, client_id: str, ws: WebSocket):
         self._connections[client_id] = BrowserConnection(ws)
@@ -69,6 +81,13 @@ class BrowserToolManager:
                 raise RuntimeError("浏览器连接不存在，请确保扩展已连接")
             return await conn.execute(tool, params)
         return executor
+
+    async def close_all(self):
+        """关闭所有 WebSocket 连接（优雅退出用）"""
+        self.shutdown_event.set()
+        for conn in list(self._connections.values()):
+            await conn.close()
+        self._connections.clear()
 
 
 # 全局单例

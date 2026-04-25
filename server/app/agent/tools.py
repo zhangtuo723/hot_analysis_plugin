@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Callable, Awaitable
 from langchain_core.tools import tool
 
@@ -77,4 +78,93 @@ def create_browser_tool(executor: Callable[..., Awaitable[str]]):
         """
         return await _safe_exec("get_dom_structure", {"selector": selector, "depth": depth})
 
-    return [screenshot, click, type_text, scroll_page, get_page_content, get_dom_structure]
+    @tool
+    async def extract_video_frames(interval: int = 2, selector: str = ""):
+        """提取页面视频的均匀抽帧画面。用于分析视频笔记的内容、画面风格、字幕设计等。
+        返回多模态内容列表，包含视频元信息文本 + 每一帧的图片，让 LLM 能直接"看到"视频画面。
+
+        Args:
+            interval: 抽帧间隔（秒），默认 2 秒一帧。
+            selector: CSS 选择器，定位具体 video 元素。留空则自动找页面上最大的视频。
+        """
+        params: dict = {"interval": interval}
+        if selector:
+            params["selector"] = selector
+        result = await _safe_exec("extract_video_frames", params)
+        if result.startswith("Error:"):
+            return [{"type": "text", "text": result}]
+        try:
+            data = json.loads(result)
+            info = data.get("video_info", {})
+            frames = data.get("frames", [])
+            frame_count = data.get("frame_count", len(frames))
+            duration = info.get("duration", "?")
+            content: list[dict] = [
+                {
+                    "type": "text",
+                    "text": (
+                        f"视频抽帧结果：共 {frame_count} 帧，"
+                        f"时长 {duration}s，分辨率 {info.get('width', '?')}x{info.get('height', '?')}"
+                    ),
+                }
+            ]
+            for frame in frames:
+                data_url = frame.get("data_url", "")
+                if data_url:
+                    content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url},
+                        }
+                    )
+            return content
+        except Exception:
+            pass
+        return [{"type": "text", "text": result}]
+
+    @tool
+    async def capture_video_snapshot(time: float = -1, selector: str = ""):
+        """截取页面视频的画面。
+        如果不指定 time，抓拍当前正在播放的画面（快速但可能有延迟偏差）。
+        如果指定 time（秒），会先暂停视频、seek 到该时间点、确认帧加载后再截图，
+        截图完成后自动恢复原来的播放进度和状态，精确无漂移。
+        返回多模态图片，让 LLM 能直接"看到"视频画面。
+
+        Args:
+            time: 要截取的时间点（秒）。小于 0 时抓拍当前画面。
+            selector: CSS 选择器，定位具体 video 元素。留空则自动找页面上最大的视频。
+        """
+        params: dict = {}
+        if time >= 0:
+            params["time"] = time
+        if selector:
+            params["selector"] = selector
+        result = await _safe_exec("capture_video_snapshot", params)
+        if result.startswith("Error:"):
+            return [{"type": "text", "text": result}]
+        try:
+            data = json.loads(result)
+            snapshot = data.get("snapshot", {})
+            data_url = snapshot.get("data_url", "")
+            if data_url:
+                info = data.get("video_info", {})
+                current = snapshot.get("time", info.get("currentTime", "?"))
+                text = f"视频快照 @ {current}s / {info.get('duration', '?')}s"
+                return [
+                    {"type": "text", "text": text},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ]
+        except Exception:
+            pass
+        return [{"type": "text", "text": result}]
+
+    return [
+        screenshot,
+        click,
+        type_text,
+        scroll_page,
+        get_page_content,
+        get_dom_structure,
+        extract_video_frames,
+        capture_video_snapshot,
+    ]

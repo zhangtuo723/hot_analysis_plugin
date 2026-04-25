@@ -11,4 +11,5 @@ websockets==13.0
 langchain-openai==0.3.0
 langgraph==1.1.9
 langgraph-prebuilt==1.0.11
+langgraph-checkpoint-sqlite==3.0.3
 deepagents==0.5.3
