@@ -40,6 +40,15 @@ def create_browser_tool(executor: Callable[..., Awaitable[str]]):
         return await _safe_exec("click", {"selector": selector})
 
     @tool
+    async def hover(selector: str) -> str:
+        """将鼠标悬停在指定元素上，触发 hover 状态。用于显示隐藏的按钮（如图片轮播的左右箭头）、下拉菜单等。
+
+        Args:
+            selector: CSS 选择器
+        """
+        return await _safe_exec("hover", {"selector": selector})
+
+    @tool
     async def type_text(selector: str, text: str, submit: bool = False) -> str:
         """在输入框中输入文字，可选是否按回车提交。
 
@@ -161,6 +170,7 @@ def create_browser_tool(executor: Callable[..., Awaitable[str]]):
     return [
         screenshot,
         click,
+        hover,
         type_text,
         scroll_page,
         get_page_content,

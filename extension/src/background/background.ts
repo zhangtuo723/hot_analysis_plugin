@@ -2,12 +2,53 @@
 // 1. 启动时连接后端 WebSocket
 // 2. 收到工具命令时注入到页面执行
 // 3. 截图请求处理
+// 4. 点击图标打开独立浮动窗口（替代默认 popup，防止失焦关闭）
 
 const WS_URL = "ws://localhost:8000/api/ws/browser";
 const CLIENT_ID = "xhs-ext-" + Math.random().toString(36).substring(2, 8);
 
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+// ---- 独立窗口管理 ----
+
+let popupWindowId: number | null = null;
+
+chrome.action.onClicked.addListener(async () => {
+  if (popupWindowId !== null) {
+    try {
+      await chrome.windows.update(popupWindowId, { focused: true });
+      return;
+    } catch {
+      popupWindowId = null;
+    }
+  }
+
+  const win = await chrome.windows.create({
+    url: chrome.runtime.getURL("popup.html"),
+    type: "popup",
+    width: 420,
+    height: 640,
+    focused: true,
+  });
+
+  if (win.id) {
+    popupWindowId = win.id;
+  }
+});
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  if (windowId === popupWindowId) {
+    popupWindowId = null;
+  }
+});
+
+// 禁止窗口 resize：尺寸变化时强制重置
+chrome.windows.onBoundsChanged.addListener((win) => {
+  if (win.id === popupWindowId && (win.width !== 420 || win.height !== 640)) {
+    chrome.windows.update(win.id!, { width: 420, height: 640 });
+  }
+});
 
 function connect() {
   ws = new WebSocket(`${WS_URL}/${CLIENT_ID}`);
@@ -39,9 +80,10 @@ async function handleToolRequest(data: {
   params: Record<string, string | number | boolean>;
 }) {
   try {
-    // 找到小红书标签页
+    // 找到小红书标签页：优先当前激活的，其次第一个匹配的
     const tabs = await chrome.tabs.query({ url: "https://www.xiaohongshu.com/*" });
-    const tab = tabs[0];
+    const activeTab = tabs.find((t) => t.active);
+    const tab = activeTab || tabs[0];
     if (!tab?.id) {
       sendToolResponse(data.request_id, false, "未找到小红书页面");
       return;

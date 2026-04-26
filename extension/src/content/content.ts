@@ -49,6 +49,9 @@ async function executeTool(
       return handleVideoSnapshot(timeParam, selectorCvs);
     }
 
+    case "hover":
+      return hover(String(params.selector));
+
     default:
       throw new Error(`Unknown tool: ${tool}`);
   }
@@ -69,6 +72,23 @@ async function click(selector: string): Promise<string> {
     el.click();
     await sleep(1500);
     return `Clicked: ${selector}`;
+  } catch (err) {
+    return `Error: ${String(err)}`;
+  }
+}
+
+async function hover(selector: string): Promise<string> {
+  try {
+    const el = document.querySelector(selector) as HTMLElement;
+    if (!el) return `Error: Element not found: ${selector}`;
+    el.dispatchEvent(
+      new MouseEvent("mouseenter", { bubbles: true, cancelable: true })
+    );
+    el.dispatchEvent(
+      new MouseEvent("mouseover", { bubbles: true, cancelable: true })
+    );
+    await sleep(800);
+    return `Hovered: ${selector}`;
   } catch (err) {
     return `Error: ${String(err)}`;
   }

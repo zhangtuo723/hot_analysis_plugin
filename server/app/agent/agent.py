@@ -9,6 +9,7 @@ import aiosqlite
 from langchain_moonshot import ChatMoonshot
 from deepagents import create_deep_agent
 from deepagents.backends.filesystem import FilesystemBackend
+from deepagents.backends.composite import CompositeBackend
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.config import settings
@@ -37,17 +38,19 @@ async def close_checkpointer() -> None:
         await _checkpointer.conn.close()
         _checkpointer = None
 
-SYSTEM_PROMPT = """你是小红书爆款内容分析专家，可以操控浏览器获取数据并分析。
+SYSTEM_PROMPT = """你是小红书爆款分析助手，也是通用浏览器操作 Agent。
 
-**安全约束：**
-1. CSS 选择器必须使用标准语法（#id、.class、[attr='value']、:nth-child(n)），不要使用 jQuery 语法如 :contains('文本')
-2. 工具报错时不要中断任务，换选择器或方法继续尝试
-3. 页面状态不确定时，用 screenshot 截图确认
+**核心能力**
+- 操控浏览器：点击、输入、滚动、截图、提取页面内容、获取 DOM 结构
+- 多模态感知：screenshot 和视频抽帧工具会返回图片，你可以直接"看到"页面当前状态
+- 执行 Skill：涉及小红书爆款分析时，按需加载 xhs skill 获取完整指令
 
-**Skill 使用：**
-- 涉及小红书搜索和抓取 → 加载 xhs-search skill
-- 涉及数据分析和报告输出 → 加载 xhs-analyze skill
-- 加载方式：read_file(path) 读取 skill 完整指令"""
+**工作原则**
+1. **先观察再行动**：操作页面前先用 screenshot 或 get_dom_structure 确认当前状态
+2. **韧性执行**：工具报错（元素未找到、操作失败）时，换选择器或换方法继续，绝不中断任务
+3. **基于视觉反馈调整**：截图后发现页面不对（如弹窗遮挡、加载中、跳转错误），主动处理后再继续
+4. **CSS 选择器规范**：只使用标准语法（#id、.class、[attr='value']、:nth-child(n)），禁止 jQuery 伪类如 :contains()
+5. **完成时输出结构化总结**：不要只回复"完成了"，要给出关键发现、数据结论或可执行建议"""
 
 
 def create_agent(
@@ -67,14 +70,24 @@ def create_agent(
         temperature=0.7,
     )
 
-    skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
-    backend = FilesystemBackend(root_dir=str(skills_dir), virtual_mode=True)
+    root_dir = Path(__file__).resolve().parent.parent.parent
+    skills_dir = root_dir / "skills"
+    workspace_dir = root_dir / "workspace"
+    workspace_dir.mkdir(exist_ok=True)
+
+    backend = CompositeBackend(
+        default=FilesystemBackend(root_dir=str(workspace_dir), virtual_mode=True),
+        routes={
+            "/skills/": FilesystemBackend(root_dir=str(skills_dir), virtual_mode=True),
+        },
+        artifacts_root="/workspace/",
+    )
 
     return create_deep_agent(
         model=llm,
         tools=tools,
         system_prompt=SYSTEM_PROMPT,
-        skills=["/"],
+        skills=["/skills/"],
         backend=backend,
         checkpointer=checkpointer,
     )

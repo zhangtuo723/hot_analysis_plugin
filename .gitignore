@@ -26,6 +26,10 @@ extension/dist/
 *.swp
 *.swo
 
+# Agent workspace
+server/workspace/
+server/skills/large_tool_results/
+
 # OS
 Thumbs.db
 .DS_Store
