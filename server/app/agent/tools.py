@@ -203,7 +203,7 @@ def create_browser_tool(executor: Callable[..., Awaitable[str]]):
         return await _safe_exec("find_element_by_text", params)
 
     @tool
-    async def generate_report(title: str, content: str, fmt: str = "md") -> str:
+    async def generate_report(title: str, content: str, fmt: str = "html") -> str:
         """生成可视化 HTML 分析报告并返回访问链接。
 
         当用户需要一份结构化、可分享的分析报告时调用此工具。

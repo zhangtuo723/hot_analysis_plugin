@@ -170,15 +170,11 @@ def generate_html_report(title: str, content: str, fmt: str = "md") -> str:
     filename = f"report_{uuid.uuid4().hex[:8]}.html"
     filepath = REPORTS_DIR / filename
 
-    if fmt == "html":
-        # 传入的已是完整 HTML，直接写入，不套模板
-        filepath.write_text(content, encoding="utf-8")
-    else:
-        html = HTML_TEMPLATE.format(
-            title=title,
-            time=datetime.now().strftime("%Y-%m-%d %H:%M"),
-            content=html_body,
-        )
-        filepath.write_text(html, encoding="utf-8")
+    html = HTML_TEMPLATE.format(
+        title=title,
+        time=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        content=html_body,
+    )
+    filepath.write_text(html, encoding="utf-8")
 
     return filename

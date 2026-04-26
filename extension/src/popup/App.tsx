@@ -32,6 +32,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const skipScrollRef = useRef(false);
 
   // 获取 client_id 和连接状态
   useEffect(() => {
@@ -104,6 +105,10 @@ function App() {
   }
 
   useEffect(() => {
+    if (skipScrollRef.current) {
+      skipScrollRef.current = false;
+      return;
+    }
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
@@ -354,6 +359,7 @@ function App() {
   };
 
   const toggleToolExpand = (msgIndex: number) => {
+    skipScrollRef.current = true;
     setMessages((prev) => {
       const updated = [...prev];
       if (updated[msgIndex].role !== "tool") return updated;
