@@ -3,14 +3,34 @@
 
 import { captureVideoFrame, extractFrames, findMainVideo, getVideoInfo, seekTo } from "./videoCapture";
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg.action === "executeTool") {
-    executeTool(msg.tool, msg.params)
-      .then((result) => sendResponse({ success: true, result }))
-      .catch((err) => sendResponse({ success: false, error: String(err) }));
-    return true;
+// 防止重复注册：background.ts 每次工具调用都会再 executeScript 注入一次本文件，
+// 顶层代码会被重复执行，listener 会叠加导致 message channel closed 错误。
+declare global {
+  interface Window {
+    __xhsListenerInstalled?: boolean;
   }
-});
+}
+
+if (!window.__xhsListenerInstalled) {
+  window.__xhsListenerInstalled = true;
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg.action === "executeTool") {
+      executeTool(msg.tool, msg.params)
+        .then((result) => sendResponse({ success: true, result }))
+        .catch((err) => sendResponse({ success: false, error: String(err) }));
+      return true;
+    }
+  });
+
+  // 定期向 background 发 keepalive，防止 Service Worker 休眠导致 WebSocket 断连
+  setInterval(() => {
+    try {
+      chrome.runtime.sendMessage({ action: "keepalive" });
+    } catch {
+      /* ignore */
+    }
+  }, 20000);
+}
 
 async function executeTool(
   tool: string,
@@ -27,11 +47,21 @@ async function executeTool(
       return type(String(params.selector), String(params.text), Boolean(params.submit));
 
     case "scroll":
-      return scroll(Number(params.pixels || 500));
+      return scroll(Number(params.pixels || 500), String(params.selector || ""), String(params.direction || "down"));
+
+    case "scroll_to_element":
+      return scrollToElement(String(params.selector));
 
     case "get_page_content":
       await waitForPageStable();
-      return getPageContent(String(params.selector || ""));
+      return getPageContent(String(params.selector || ""), Number(params.max_depth || 0));
+
+    case "find_element_by_text":
+      return findElementByText(
+        String(params.keyword),
+        String(params.selector || ""),
+        Number(params.nth || 1)
+      );
 
     case "get_dom_structure":
       await waitForPageStable();
@@ -39,13 +69,15 @@ async function executeTool(
 
     case "extract_video_frames": {
       const interval = Number(params.interval || 2);
-      const selectorEvf = params.selector ? String(params.selector) : undefined;
+      const selectorEvf = params.selector ? String(params.selector) : "";
+      if (!selectorEvf) throw new Error("selector 参数必填");
       return handleExtractVideoFrames(interval, selectorEvf);
     }
 
     case "capture_video_snapshot": {
       const timeParam = params.time !== undefined ? Number(params.time) : undefined;
-      const selectorCvs = params.selector ? String(params.selector) : undefined;
+      const selectorCvs = params.selector ? String(params.selector) : "";
+      if (!selectorCvs) throw new Error("selector 参数必填");
       return handleVideoSnapshot(timeParam, selectorCvs);
     }
 
@@ -169,21 +201,43 @@ async function type(selector: string, text: string, submit: boolean): Promise<st
   }
 }
 
-async function scroll(pixels: number): Promise<string> {
-  window.scrollBy({ top: pixels, behavior: "smooth" });
-  // 滚动后等待内容懒加载
+async function scroll(pixels: number, selector: string = "", direction: string = "down"): Promise<string> {
+  const isUp = direction === "up";
+  const delta = isUp ? -pixels : pixels;
+
+  if (selector) {
+    const el = document.querySelector(selector) as HTMLElement;
+    if (!el) return `Error: Element not found: ${selector}`;
+    el.scrollBy({ top: delta, behavior: "smooth" });
+    await sleep(2000);
+    return `Scrolled ${selector} ${pixels}px ${isUp ? "up" : "down"}. scrollTop: ${el.scrollTop}`;
+  }
+
+  window.scrollBy({ top: delta, behavior: "smooth" });
   await sleep(2000);
-  return `Scrolled ${pixels}px down. Current position: ${window.scrollY}`;
+  return `Scrolled ${pixels}px ${isUp ? "up" : "down"}. Current position: ${window.scrollY}`;
 }
 
-function getPageContent(selector: string): string {
+async function scrollToElement(selector: string): Promise<string> {
+  try {
+    const el = document.querySelector(selector) as HTMLElement;
+    if (!el) return `Error: Element not found: ${selector}`;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    await sleep(1500);
+    return `Scrolled to element: ${selector}`;
+  } catch (err) {
+    return `Error: ${String(err)}`;
+  }
+}
+
+function getPageContent(selector: string, maxDepth: number = 0): string {
   try {
     const root = selector ? document.querySelector(selector) : document.body;
     if (!root) return `Error: Element not found: ${selector}`;
 
     const texts: string[] = [];
     const walk = (node: Node, depth: number) => {
-      if (depth > 8) return;
+      if (maxDepth > 0 && depth > maxDepth) return;
       if (node.nodeType === Node.TEXT_NODE) {
         const text = node.textContent?.trim();
         if (text) texts.push(text);
@@ -202,6 +256,119 @@ function getPageContent(selector: string): string {
   } catch (err) {
     return `Error: ${String(err)}`;
   }
+}
+
+function findElementByText(keyword: string, scopeSelector: string, nth: number): string {
+  try {
+    const root = scopeSelector ? document.querySelector(scopeSelector) : document.body;
+    if (!root) return `Error: Scope not found: ${scopeSelector}`;
+
+    const lowerKeyword = keyword.toLowerCase().trim();
+    if (!lowerKeyword) return `Error: Keyword is empty`;
+
+    const candidates: Array<{ el: Element; score: number; selector: string }> = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const el = node as HTMLElement;
+      const style = getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+
+      const text = el.textContent?.trim() || "";
+      const ariaLabel = el.getAttribute("aria-label")?.trim() || "";
+      const title = el.getAttribute("title")?.trim() || "";
+      const alt = el.getAttribute("alt")?.trim() || "";
+      const placeholder = el.getAttribute("placeholder")?.trim() || "";
+
+      let score = 0;
+
+      if (text.toLowerCase() === lowerKeyword) score += 100;
+      else if (text.toLowerCase().includes(lowerKeyword)) score += 50;
+
+      if (ariaLabel.toLowerCase() === lowerKeyword) score += 90;
+      else if (ariaLabel.toLowerCase().includes(lowerKeyword)) score += 40;
+
+      if (title.toLowerCase() === lowerKeyword) score += 80;
+      else if (title.toLowerCase().includes(lowerKeyword)) score += 35;
+
+      if (alt.toLowerCase() === lowerKeyword) score += 70;
+      else if (alt.toLowerCase().includes(lowerKeyword)) score += 30;
+
+      if (placeholder.toLowerCase() === lowerKeyword) score += 60;
+      else if (placeholder.toLowerCase().includes(lowerKeyword)) score += 25;
+
+      if (score > 0) {
+        candidates.push({ el, score, selector: generateSelector(el) });
+      }
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+
+    if (candidates.length === 0) {
+      return `Error: No element found matching "${keyword}"`;
+    }
+
+    const index = Math.max(1, Math.min(nth, candidates.length));
+    const match = candidates[index - 1];
+    const el = match.el as HTMLElement;
+    const tag = el.tagName.toLowerCase();
+    const rect = el.getBoundingClientRect();
+    const isClickable =
+      el.onclick !== null ||
+      tag === "button" ||
+      tag === "a" ||
+      el.getAttribute("role") === "button";
+
+    return (
+      `Found: selector="${match.selector}"\n` +
+      `  tag=<${tag}>  text="${(el.textContent?.trim() || "").substring(0, 50)}"\n` +
+      `  visible=true  clickable=${isClickable}\n` +
+      `  position=(${Math.round(rect.x)}, ${Math.round(rect.y)})  size=${Math.round(rect.width)}x${Math.round(rect.height)}\n` +
+      `  (match ${index}/${candidates.length}, score=${match.score})`
+    );
+  } catch (err) {
+    return `Error: ${String(err)}`;
+  }
+}
+
+function generateSelector(el: Element): string {
+  if (el.id) return `#${el.id}`;
+
+  const tag = el.tagName.toLowerCase();
+
+  // 尝试用稳定的 class（过滤掉像 "_aB3cD4eF" 这种动态 hash）
+  const stableClasses = Array.from(el.classList).filter(
+    (c) => c.length < 20 && !/^[a-zA-Z0-9_]{10,}$/.test(c)
+  );
+  if (stableClasses.length > 0) {
+    const classSelector = `${tag}.${stableClasses.join(".")}`;
+    if (document.querySelectorAll(classSelector).length === 1) {
+      return classSelector;
+    }
+  }
+
+  // nth-child 路径
+  const path: string[] = [];
+  let current: Element | null = el;
+  while (current && current !== document.body) {
+    const currentTag = current.tagName.toLowerCase();
+    const parent: Element | null = current.parentElement;
+    if (!parent) break;
+
+    const siblings = Array.from(parent.children).filter(
+      (s: Element) => s.tagName === current!.tagName
+    );
+    if (siblings.length > 1) {
+      const idx = siblings.indexOf(current) + 1;
+      path.unshift(`${currentTag}:nth-child(${idx})`);
+    } else {
+      path.unshift(currentTag);
+    }
+    current = parent;
+  }
+
+  return path.join(" > ");
 }
 
 function getDomStructure(selector: string, depth: number): string {
@@ -318,20 +485,16 @@ async function handleExtractVideoFrames(interval = 2, selector?: string): Promis
 
   const frames = await extractFrames(video, interval);
 
-  // 返回 JSON：包含视频元信息 + 帧列表
-  return JSON.stringify(
-    {
-      video_info: info,
-      frames: frames.map((f) => ({
-        time: f.time,
-        data_url: f.dataUrl,
-        // 为了节省空间，也可以只返回缩略图或上传到后端后再发 URL
-      })),
-      frame_count: frames.length,
-    },
-    null,
-    2
-  );
+  const payload = JSON.stringify({
+    video_info: info,
+    frames: frames.map((f) => ({
+      time: f.time,
+      data_url: f.dataUrl,
+    })),
+    frame_count: frames.length,
+  });
+  console.log(`[XHS Content] extract_video_frames done: ${frames.length} frames, payload size ${payload.length}`);
+  return payload;
 }
 
 /**

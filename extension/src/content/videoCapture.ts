@@ -30,6 +30,7 @@ export function findMainVideo(selector?: string): HTMLVideoElement | null {
 
 /**
  * 将视频 seek 到指定秒数，等待帧加载完成后 resolve。
+ * 5 秒超时兜底，防止直播流或 DRM 视频永远 hang 住。
  */
 export function seekTo(video: HTMLVideoElement, time: number): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -44,30 +45,37 @@ export function seekTo(video: HTMLVideoElement, time: number): Promise<void> {
     const cleanup = () => {
       video.removeEventListener("seeked", onSeeked);
       video.removeEventListener("error", onError);
+      clearTimeout(timer);
     };
     video.addEventListener("seeked", onSeeked);
     video.addEventListener("error", onError);
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("视频 seek 超时"));
+    }, 5000);
     video.currentTime = Math.min(time, video.duration || time);
   });
 }
 
 /**
  * 对 video 元素当前画面截图，返回 base64 dataURL。
+ * 限制尺寸和质量，避免消息传递/WebSocket 传输时数据量过大导致失败。
  */
 export function captureVideoFrame(
   video: HTMLVideoElement,
-  maxWidth = 1280
+  maxWidth = 640
 ): string {
   const canvas = document.createElement("canvas");
   const scale = Math.min(1, maxWidth / video.videoWidth);
-  canvas.width = video.videoWidth * scale;
-  canvas.height = video.videoHeight * scale;
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
 
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("无法创建 canvas context");
 
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL("image/jpeg", 0.9);
+  // quality 0.6 足够 LLM 识别内容，同时大幅减少体积
+  return canvas.toDataURL("image/jpeg", 0.6);
 }
 
 /**
@@ -78,9 +86,13 @@ export async function extractFrames(
   interval = 2.0
 ): Promise<VideoFrame[]> {
   const duration = video.duration;
-  if (!duration || isNaN(duration)) {
+  if (!duration || isNaN(duration) || !isFinite(duration)) {
     throw new Error("视频时长不可用");
   }
+
+  // 限制最多抽 20 帧，避免数据量过大导致 chrome.tabs.sendMessage / WebSocket 传输失败
+  const MAX_FRAMES = 20;
+  const effectiveInterval = Math.max(interval, duration / MAX_FRAMES);
 
   const frames: VideoFrame[] = [];
   const originalTime = video.currentTime;
@@ -90,14 +102,18 @@ export async function extractFrames(
   video.pause();
 
   try {
-    for (let t = 0; t < duration; t += interval) {
+    for (let t = 0; t < duration && frames.length < MAX_FRAMES; t += effectiveInterval) {
       await seekTo(video, t);
       const dataUrl = captureVideoFrame(video);
       frames.push({ time: t, dataUrl });
     }
   } finally {
     // 恢复原状态
-    await seekTo(video, originalTime);
+    try {
+      await seekTo(video, originalTime);
+    } catch {
+      // 恢复失败不影响结果
+    }
     if (!originalPaused) video.play();
   }
 

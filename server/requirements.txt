@@ -8,8 +8,11 @@ httpx==0.27.0
 pydantic==2.9.0
 pydantic-settings==2.5.0
 websockets==13.0
+aiosqlite==0.21.0
 langchain-openai==0.3.0
+langchain-moonshot==0.1.0
 langgraph==1.1.9
 langgraph-prebuilt==1.0.11
 langgraph-checkpoint-sqlite==3.0.3
 deepagents==0.5.3
+markdown==3.7

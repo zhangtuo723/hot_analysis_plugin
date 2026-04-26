@@ -3,7 +3,7 @@
   "name": "小红书爆款分析",
   "version": "0.3.0",
   "description": "对话式小红书爆款分析助手，AI Agent 自动操作浏览器抓取数据并分析爆款规律",
-  "permissions": ["activeTab", "tabs", "scripting", "storage"],
+  "permissions": ["activeTab", "tabs", "scripting", "storage", "alarms"],
   "host_permissions": ["https://www.xiaohongshu.com/*"],
   "action": {
     "default_title": "小红书爆款分析",

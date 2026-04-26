@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import asyncio
+import uuid
 from typing import Awaitable, Callable
 
 from fastapi import WebSocket
@@ -18,7 +18,7 @@ class BrowserConnection:
 
     async def execute(self, tool: str, params: dict) -> str:
         """发送工具命令，等待结果"""
-        request_id = f"{tool}_{id(asyncio.current_task())}"
+        request_id = f"{tool}_{uuid.uuid4().hex}"
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[request_id] = future
 
@@ -29,9 +29,10 @@ class BrowserConnection:
             "params": params,
         })
 
-        result = await asyncio.wait_for(future, timeout=60)
-        del self._pending[request_id]
-        return result
+        try:
+            return await asyncio.wait_for(future, timeout=60)
+        finally:
+            self._pending.pop(request_id, None)
 
     def handle_response(self, data: dict):
         """处理扩展返回的工具结果"""
@@ -41,7 +42,14 @@ class BrowserConnection:
             if data.get("success"):
                 future.set_result(data.get("result", ""))
             else:
-                future.set_exception(Exception(data.get("error", "工具执行失败")))
+                # 扩展端在失败时把真实错误塞在 result 字段（见 background.ts sendToolResponse），
+                # 这里优先取 result，兼容 error 字段，最后才用兜底文案。
+                err_msg = (
+                    data.get("error")
+                    or data.get("result")
+                    or "工具执行失败"
+                )
+                future.set_exception(Exception(err_msg))
 
     async def close(self):
         """取消所有 pending future 并关闭 websocket"""
@@ -65,8 +73,14 @@ class BrowserToolManager:
     def add(self, client_id: str, ws: WebSocket):
         self._connections[client_id] = BrowserConnection(ws)
 
-    def remove(self, client_id: str):
-        self._connections.pop(client_id, None)
+    def remove(self, client_id: str, ws=None):
+        """移除连接。如果传入 ws，只移除匹配该 WebSocket 对象的连接，防止旧连接误删新连接。"""
+        if ws is not None:
+            conn = self._connections.get(client_id)
+            if conn and conn.ws is ws:
+                self._connections.pop(client_id, None)
+        else:
+            self._connections.pop(client_id, None)
 
     def handle_message(self, client_id: str, data: dict):
         conn = self._connections.get(client_id)

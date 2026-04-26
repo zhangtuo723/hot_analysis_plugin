@@ -4,7 +4,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from app.database import get_db, SessionLocal
@@ -98,6 +98,7 @@ async def chat_stream_endpoint(req: ChatRequest, db: Session = Depends(get_db)):
     async def event_stream():
         full_reply = ""
         round_tool_calls: list[dict] = []
+        tool_index: dict[str, int] = {}
         start_time = datetime.now()
         try:
             async for event in run_agent_stream(
@@ -107,20 +108,36 @@ async def chat_stream_endpoint(req: ChatRequest, db: Session = Depends(get_db)):
                 if event["type"] == "message":
                     full_reply += event["content"]
                 elif event["type"] == "tool_start":
+                    # 优先用 LLM 返回的 tool_call_id，缺失时回退到合成 id
+                    tc_id = (
+                        str(event.get("id"))
+                        if event.get("id")
+                        else f"{event['tool']}_{int(start_time.timestamp() * 1000)}_{len(round_tool_calls)}"
+                    )
                     round_tool_calls.append(
                         {
-                            "id": f"{event['tool']}_{int(start_time.timestamp() * 1000)}_{len(round_tool_calls)}",
+                            "id": tc_id,
                             "tool": event["tool"],
                             "params": event.get("params", {}),
                             "status": "running",
                         }
                     )
+                    tool_index[tc_id] = len(round_tool_calls) - 1
                 elif event["type"] == "tool_result":
-                    for tc in reversed(round_tool_calls):
-                        if tc["tool"] == event["tool"] and tc["status"] == "running":
-                            tc["result"] = event.get("result", "")
-                            tc["status"] = "done"
-                            break
+                    target_idx: int | None = None
+                    evt_id = event.get("id")
+                    if evt_id and evt_id in tool_index:
+                        target_idx = tool_index[evt_id]
+                    else:
+                        # 回退：按工具名找最早一个还在 running 的（FIFO，匹配 LangGraph 并行返回顺序）
+                        for idx, tc in enumerate(round_tool_calls):
+                            if tc["tool"] == event["tool"] and tc["status"] == "running":
+                                target_idx = idx
+                                break
+                    if target_idx is not None:
+                        tc = round_tool_calls[target_idx]
+                        tc["result"] = event.get("result", "")
+                        tc["status"] = "done"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
 
@@ -129,14 +146,40 @@ async def chat_stream_endpoint(req: ChatRequest, db: Session = Depends(get_db)):
             conv2 = db2.query(Conversation).filter(Conversation.id == conv_id).first()
             if conv2:
                 current_history = json.loads(conv2.messages_json)
+
+                # 把未完成的工具标记为 error
+                for tc in round_tool_calls:
+                    if tc.get("status") == "running":
+                        tc["status"] = "error"
+                        tc["result"] = "未返回结果"
+
+                # 把本轮工具调用展开为独立的 role='tool' 消息，插入到最后一条 user 之后
+                insert_pos = len(current_history)
+                for idx in range(len(current_history) - 1, -1, -1):
+                    if current_history[idx].get("role") == "user":
+                        insert_pos = idx + 1
+                        break
+
+                for tc in round_tool_calls:
+                    current_history.insert(
+                        insert_pos,
+                        {
+                            "role": "tool",
+                            "id": tc["id"],
+                            "tool": tc["tool"],
+                            "params": tc["params"],
+                            "status": tc["status"],
+                            "result": tc.get("result", ""),
+                            "content": tc.get("result", "") or "",
+                        },
+                    )
+                    insert_pos += 1
+
                 current_history.append(
                     {"role": "assistant", "content": full_reply or "Agent 未生成回复"}
                 )
                 conv2.messages_json = json.dumps(current_history, ensure_ascii=False)
-
-                existing_tool_calls = json.loads(conv2.tool_calls_json or "[]")
-                existing_tool_calls.extend(round_tool_calls)
-                conv2.tool_calls_json = json.dumps(existing_tool_calls, ensure_ascii=False)
+                conv2.tool_calls_json = "[]"
 
                 if not conv2.title and req.content:
                     conv2.title = req.content[:50]
@@ -180,6 +223,8 @@ def list_conversations(user_id: str | None = None, db: Session = Depends(get_db)
 
 
 class MessageItem(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     role: str
     content: str
 
@@ -192,18 +237,40 @@ class ConversationDetail(BaseModel):
     created_at: str | None
 
 
+def _flatten_tool_calls(messages: list[dict]) -> list[dict]:
+    """兼容旧格式：把嵌套在 user 消息里的 toolCalls 展开为独立的 role='tool' 消息"""
+    result: list[dict] = []
+    for msg in messages:
+        tool_calls = msg.pop("toolCalls", None)
+        result.append(msg)
+        if tool_calls and isinstance(tool_calls, list):
+            for tc in tool_calls:
+                result.append(
+                    {
+                        "role": "tool",
+                        "id": tc.get("id", ""),
+                        "tool": tc.get("tool", ""),
+                        "params": tc.get("params", {}),
+                        "status": tc.get("status", "done"),
+                        "result": tc.get("result", ""),
+                        "content": tc.get("result", "") or "",
+                    }
+                )
+    return result
+
+
 @router.get("/conversations/{conv_id}", response_model=ConversationDetail)
 def get_conversation(conv_id: str, db: Session = Depends(get_db)):
     conv = db.query(Conversation).filter(Conversation.id == conv_id).first()
     if not conv:
         raise HTTPException(404, "对话不存在")
     messages = json.loads(conv.messages_json)
-    tool_calls = json.loads(conv.tool_calls_json or "[]")
+    messages = _flatten_tool_calls(messages)
     return ConversationDetail(
         id=conv.id,
         title=conv.title,
         messages=[MessageItem(**m) for m in messages],
-        tool_calls=tool_calls,
+        tool_calls=[],
         created_at=conv.created_at.isoformat() if conv.created_at else None,
     )
 
@@ -230,13 +297,17 @@ async def browser_websocket(websocket: WebSocket, client_id: str):
                 data = await asyncio.wait_for(
                     websocket.receive_json(), timeout=1.0
                 )
+                # 应用层心跳：收到 ping 立即回 pong
+                if data.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
                 browser_manager.handle_message(client_id, data)
             except asyncio.TimeoutError:
                 continue
     except WebSocketDisconnect:
         pass
     finally:
-        browser_manager.remove(client_id)
+        browser_manager.remove(client_id, websocket)
 
 
 # ---- Helpers ----

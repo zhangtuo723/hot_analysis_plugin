@@ -10,7 +10,14 @@ export interface NoteItem {
 }
 
 export interface ChatMessage {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "tool";
   content: string;
   notes?: NoteItem[];
+  // tool 消息专用
+  id?: string;
+  tool?: string;
+  params?: Record<string, unknown>;
+  result?: string;
+  status?: "running" | "done" | "error";
+  expanded?: boolean;
 }

@@ -8,6 +8,7 @@
     "watch": "tsc && vite build --watch"
   },
   "dependencies": {
+    "marked": "^18.0.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

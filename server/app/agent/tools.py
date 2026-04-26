@@ -60,22 +60,31 @@ def create_browser_tool(executor: Callable[..., Awaitable[str]]):
         return await _safe_exec("type", {"selector": selector, "text": text, "submit": submit})
 
     @tool
-    async def scroll_page(pixels: int = 500) -> str:
-        """向下滚动页面，用于加载更多内容。
+    async def scroll_page(pixels: int = 500, selector: str = "", direction: str = "down") -> str:
+        """滚动页面或指定元素，用于加载更多内容或定位到某个区域。
 
         Args:
             pixels: 滚动像素数，默认 500
+            selector: CSS 选择器，定位要滚动的容器。留空则滚动整个页面。
+            direction: 滚动方向，down（向下）或 up（向上），默认 down。
         """
-        return await _safe_exec("scroll", {"pixels": pixels})
+        params: dict = {"pixels": pixels, "direction": direction}
+        if selector:
+            params["selector"] = selector
+        return await _safe_exec("scroll", params)
 
     @tool
-    async def get_page_content(selector: str = "") -> str:
+    async def get_page_content(selector: str = "", max_depth: int = 0) -> str:
         """获取页面的文本内容。用于提取笔记标题、点赞数等信息。
 
         Args:
             selector: CSS 选择器，限定提取范围。留空则提取整个页面。
+            max_depth: 最大提取深度，0 表示不限制。
         """
-        return await _safe_exec("get_page_content", {"selector": selector})
+        params: dict = {"selector": selector}
+        if max_depth > 0:
+            params["max_depth"] = max_depth
+        return await _safe_exec("get_page_content", params)
 
     @tool
     async def get_dom_structure(selector: str = "body", depth: int = 3) -> str:
@@ -88,18 +97,17 @@ def create_browser_tool(executor: Callable[..., Awaitable[str]]):
         return await _safe_exec("get_dom_structure", {"selector": selector, "depth": depth})
 
     @tool
-    async def extract_video_frames(interval: int = 2, selector: str = ""):
+    async def extract_video_frames(selector: str, interval: int = 2):
         """提取页面视频的均匀抽帧画面。用于分析视频笔记的内容、画面风格、字幕设计等。
         返回多模态内容列表，包含视频元信息文本 + 每一帧的图片，让 LLM 能直接"看到"视频画面。
 
+        **注意：调用前必须先用 `get_dom_structure` 或 `find_element_by_text` 定位到 video 元素的选择器。**
+
         Args:
+            selector: CSS 选择器，定位具体 video 元素（必填）。
             interval: 抽帧间隔（秒），默认 2 秒一帧。
-            selector: CSS 选择器，定位具体 video 元素。留空则自动找页面上最大的视频。
         """
-        params: dict = {"interval": interval}
-        if selector:
-            params["selector"] = selector
-        result = await _safe_exec("extract_video_frames", params)
+        result = await _safe_exec("extract_video_frames", {"selector": selector, "interval": interval})
         if result.startswith("Error:"):
             return [{"type": "text", "text": result}]
         try:
@@ -132,22 +140,22 @@ def create_browser_tool(executor: Callable[..., Awaitable[str]]):
         return [{"type": "text", "text": result}]
 
     @tool
-    async def capture_video_snapshot(time: float = -1, selector: str = ""):
+    async def capture_video_snapshot(selector: str, time: float = -1):
         """截取页面视频的画面。
         如果不指定 time，抓拍当前正在播放的画面（快速但可能有延迟偏差）。
         如果指定 time（秒），会先暂停视频、seek 到该时间点、确认帧加载后再截图，
         截图完成后自动恢复原来的播放进度和状态，精确无漂移。
         返回多模态图片，让 LLM 能直接"看到"视频画面。
 
+        **注意：调用前必须先用 `get_dom_structure` 或 `find_element_by_text` 定位到 video 元素的选择器。**
+
         Args:
+            selector: CSS 选择器，定位具体 video 元素（必填）。
             time: 要截取的时间点（秒）。小于 0 时抓拍当前画面。
-            selector: CSS 选择器，定位具体 video 元素。留空则自动找页面上最大的视频。
         """
-        params: dict = {}
+        params: dict = {"selector": selector}
         if time >= 0:
             params["time"] = time
-        if selector:
-            params["selector"] = selector
         result = await _safe_exec("capture_video_snapshot", params)
         if result.startswith("Error:"):
             return [{"type": "text", "text": result}]
@@ -167,14 +175,61 @@ def create_browser_tool(executor: Callable[..., Awaitable[str]]):
             pass
         return [{"type": "text", "text": result}]
 
+    @tool
+    async def scroll_to_element(selector: str) -> str:
+        """平滑滚动到指定元素位置，使其位于视口中央。用于定位评论区、加载更多按钮、特定笔记等。
+
+        Args:
+            selector: CSS 选择器，定位目标元素
+        """
+        return await _safe_exec("scroll_to_element", {"selector": selector})
+
+    @tool
+    async def find_element_by_text(keyword: str, selector: str = "", nth: int = 1) -> str:
+        """通过关键词在页面中查找元素，返回可用于 click/type 等操作的 CSS 选择器。
+
+        当 Agent 从截图中看到某个按钮/文字但不知道其 CSS 选择器时调用。
+        会按 textContent、aria-label、title、alt、placeholder 等属性匹配，
+        返回分数最高且可见的元素的选择器。
+
+        Args:
+            keyword: 要匹配的关键词/文字，如"发布笔记"
+            selector: 限定搜索范围的 CSS 选择器，留空则搜索整个页面
+            nth: 如果多个元素匹配，取第几个（从 1 开始），默认第 1 个
+        """
+        params: dict = {"keyword": keyword, "nth": nth}
+        if selector:
+            params["selector"] = selector
+        return await _safe_exec("find_element_by_text", params)
+
+    @tool
+    async def generate_report(title: str, content: str, fmt: str = "md") -> str:
+        """生成可视化 HTML 分析报告并返回访问链接。
+
+        当用户需要一份结构化、可分享的分析报告时调用此工具。
+        支持 Markdown 自动转 HTML，或直接传入 HTML 代码。
+        返回一个 URL，用户点击即可在新标签页查看完整报告。
+
+        Args:
+            title: 报告标题（如"减肥餐爆款分析报告"）
+            content: 报告正文内容。fmt="md" 时为 Markdown，fmt="html" 时为原始 HTML 代码。
+            fmt: 内容格式，"md" 或 "html"。默认 "md"。
+        """
+        from app.services.report import generate_html_report
+        filename = generate_html_report(title, content, fmt)
+        return f"报告已生成：http://localhost:8000/reports/{filename}"
+
     return [
         screenshot,
         click,
         hover,
         type_text,
         scroll_page,
+        scroll_to_element,
         get_page_content,
         get_dom_structure,
+        find_element_by_text,
         extract_video_frames,
         capture_video_snapshot,
+        generate_report,
     ]
